@@ -101,5 +101,67 @@ iface eth1 inet static
     netmask 255.255.255.0
 EOF
 
+echo "=== Step 8: Configuring nftables (SNAT / Masquerading) ==="
+cp /etc/nftables.conf /etc/nftables.conf.bak
+
+# Usage of 'EOF' in braces prevents insertion of bash variables in block, 
+# allowing the use of $ in nftables rules without escaping.
+cat << 'EOF' > /etc/nftables.conf
+#!/usr/sbin/nft -f
+
+flush ruleset
+
+# Basic firewall ruleset for a Linux router with NAT (Masquerading)
+
+table inet filter {
+    chain input {
+        type filter hook input priority 0; policy drop;
+        
+        # Allow loopback
+        iif "lo" accept
+        
+        # Allow established and related connections
+        ct state established,related accept
+        
+        # Drop invalid packets
+        ct state invalid drop
+        
+        # Allow SSH connections for server management
+        # REMOVE WHEN CONFIGURATION IS COMPLETE, OR RESTRICT TO SPECIFIC IPs
+        tcp dport 22 accept
+    }
+    
+    chain forward {
+        type filter hook forward priority 0; policy drop;
+        
+        # Allow forwarding of traffic from the internal network (eth1) to the external network (eth0)
+        iifname "eth1" oifname "eth0" accept
+        
+        # Allow reply traffic from the internet back to the local network
+        iifname "eth0" oifname "eth1" ct state established,related accept
+    }
+    
+    chain output {
+        type filter hook output priority 0; policy accept;
+    }
+}
+
+# Network address translation (NAT) table
+table ip nat {
+    chain postrouting {
+        type nat hook postrouting priority 100; policy accept;
+        
+        # Enable masquerading (SNAT) for all outgoing traffic through the external interface eth0
+        oifname "eth0" masquerade
+    }
+}
+EOF
+
+# Restarting nftables to apply the new rules
+systemctl restart nftables
+echo "[OK] Firewall and NAT rules successfully applied."
+
+echo "---"
+
 echo "Installation completed! Basic NGFW components are ready."
 echo "Please check and finalize the /etc/network/interfaces file before rebooting."
