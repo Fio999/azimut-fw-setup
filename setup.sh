@@ -366,7 +366,7 @@ Requires=nftables.service
 [Service]
 Type=simple
 ExecStartPre=/usr/bin/env bash -c 'test -f /etc/suricata/suricata.yaml'
-ExecStart=${SURICATA_BIN} -c /etc/suricata/suricata.yaml -q 0 --pidfile /run/suricata/suricata.pid
+ExecStart=${SURICATA_BIN} -c /usr/local/etc/suricata/suricata.yaml -q 0 --pidfile /run/suricata/suricata.pid
 ExecReload=/bin/kill -HUP \$MAINPID
 Restart=on-failure
 RestartSec=5
@@ -397,7 +397,7 @@ else
 fi
 
 echo "=== Step 11: Switching DNS resolution to local BIND9 ==="
-systemctl enable --now bind9
+systemctl enable --now named
 echo "nameserver 127.0.0.1" > /etc/resolvconf/resolv.conf.d/head
 rm -f /etc/resolvconf/resolv.conf.d/head- 2>/dev/null || true
 resolvconf -u
