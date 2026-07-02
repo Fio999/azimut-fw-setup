@@ -443,7 +443,7 @@ if systemctl list-unit-files | grep -q '^suricata\.service'; then
     cat <<EOF > /etc/systemd/system/suricata.service.d/override.conf
 [Service]
 ExecStart=
-ExecStart=${SURICATA_BIN} -c /etc/suricata/suricata.yaml -q 0 --pidfile /run/suricata/suricata.pid
+ExecStart=${SURICATA_BIN} -c /usr/local/etc/suricata/suricata.yaml -q 0 --pidfile /run/suricata/suricata.pid
 EOF
 else
     # No unit file at all (typical for a source build) - create one from
@@ -461,7 +461,7 @@ Requires=nftables.service
 
 [Service]
 Type=simple
-ExecStartPre=/usr/bin/env bash -c 'test -f /etc/suricata/suricata.yaml'
+ExecStartPre=/usr/bin/env bash -c 'test -f /usr/local/etc/suricata/suricata.yaml'
 ExecStart=${SURICATA_BIN} -c /usr/local/etc/suricata/suricata.yaml -q 0 --pidfile /run/suricata/suricata.pid
 ExecReload=/bin/kill -HUP \$MAINPID
 Restart=on-failure
@@ -488,7 +488,7 @@ if systemctl start suricata; then
     fi
 else
     echo "[WARNING] Suricata failed to start. Check 'journalctl -u suricata -e' and"
-    echo "          /etc/suricata/suricata.yaml (HOME_NET, interface names, etc.)"
+    echo "          /usr/local/etc/suricata/suricata.yaml (HOME_NET, interface names, etc.)"
     echo "          before relying on the fail-open forward rules above."
 fi
 
@@ -516,7 +516,7 @@ echo "Before rebooting, please verify:"
 echo "  1. /etc/network/interfaces has the CORRECT addressing for your network"
 echo "     (WAN_ADDRESS/WAN_GATEWAY/LAN_ADDRESS at the top of this script)."
 echo "  2. SSH_ALLOWED_SOURCE reflects your actual admin network, not 0.0.0.0/0."
-echo "  3. /etc/suricata/suricata.yaml HOME_NET and interface settings match"
+echo "  3. /usr/local/etc/suricata/suricata.yaml HOME_NET and interface settings match"
 echo "     ${SURICATA_INTERFACE}/${INTERNAL_INTERFACE}."
 echo "  4. Suricata is actually running (systemctl status suricata) before"
 echo "     trusting the 'bypass' forward rules — otherwise traffic passes"
