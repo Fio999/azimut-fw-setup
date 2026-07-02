@@ -13,13 +13,13 @@ set -euo pipefail # Stop on error, unset var use, or failed pipe
 # CONFIGURATION - edit these before running
 # ============================================================
 SURICATA_VERSION="7.0.16"          # Suricata version to build
-SURICATA_INTERFACE="eth0"         # External (WAN) interface
-INTERNAL_INTERFACE="eth1"         # Internal (LAN) interface
+SURICATA_INTERFACE="enp0s3"        # External (WAN) interface
+INTERNAL_INTERFACE="enp0s8"        # Internal (LAN) interface
 
-USERNAME_SUDO="admin"             # User to add to sudo group
+USERNAME_SUDO="john"               # User to add to sudo group
 
-PRIMARY_NAMESERVER="8.8.8.8"      # Temporary resolver used only during install
-SECONDARY_NAMESERVER="1.1.1.1"    # Temporary resolver used only during install
+PRIMARY_NAMESERVER="8.8.8.8"       # Temporary resolver used only during install
+SECONDARY_NAMESERVER="1.1.1.1"     # Temporary resolver used only during install
 
 MIN_RUST_VERSION="1.63.0"
 
@@ -27,6 +27,7 @@ MIN_RUST_VERSION="1.63.0"
 WAN_ADDRESS="10.0.0.2"
 WAN_NETMASK="255.255.255.0"
 WAN_GATEWAY="10.0.0.1"
+
 LAN_ADDRESS="192.168.1.1"
 LAN_NETMASK="255.255.255.0"
 
