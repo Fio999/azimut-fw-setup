@@ -21,6 +21,8 @@ USERNAME_SUDO="admin"             # User to add to sudo group
 PRIMARY_NAMESERVER="8.8.8.8"      # Temporary resolver used only during install
 SECONDARY_NAMESERVER="1.1.1.1"    # Temporary resolver used only during install
 
+MIN_RUST_VERSION="1.75.0"
+
 # Real network addressing - YOU MUST SET THESE CORRECTLY FOR YOUR NETWORK
 WAN_ADDRESS="10.0.0.2"
 WAN_NETMASK="255.255.255.0"
@@ -105,14 +107,86 @@ apt install -y autoconf automake build-essential \
     libnetfilter-queue-dev libnfnetlink-dev python3-yaml \
     python3-setuptools
 
-# NOTE: cargo/rustc intentionally NOT installed via apt to avoid a
-# conflicting toolchain with rustup below. Only rustup manages Rust here.
-echo "Installing Rust via rustup (unattended)..."
-if ! command -v rustc &>/dev/null; then
-    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+# --- Rust installation: try Debian backports first, fall back to rustup ---
+# Some networks/providers block CDN of static.rust-lang.org (Fastly) 
+# while leaving ICMP and the rest of the internet reachable, which
+# breaks rustup. Backports uses the same deb.debian.org mirrors already 
+# required for apt, so it's a more reliable first attempt; rustup remains as 
+# a fallback for when backports doesn't carry a new-enough rustc.
+
+version_ge() {
+    # Returns success if $1 >= $2 (simple dotted version compare)
+    [ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | head -n1)" = "$2" ]
+}
+
+RUST_OK=0
+
+if command -v rustc &>/dev/null; then
+    CURRENT_VER="$(rustc --version | awk '{print $2}')"
+    if version_ge "$CURRENT_VER" "$MIN_RUST_VERSION"; then
+        echo "[OK] rustc $CURRENT_VER already installed and meets minimum version."
+        RUST_OK=1
+    fi
 fi
-# shellcheck disable=SC1091
-source "$HOME/.cargo/env"
+
+if [[ "$RUST_OK" -eq 0 ]]; then
+    echo "=== Attempting Rust install via Debian backports ==="
+    DEBIAN_CODENAME="$(. /etc/os-release && echo "$VERSION_CODENAME")"
+    BACKPORTS_LINE="deb http://deb.debian.org/debian ${DEBIAN_CODENAME}-backports main"
+
+    if ! grep -qF "$BACKPORTS_LINE" /etc/apt/sources.list /etc/apt/sources.list.d/*.list 2>/dev/null; then
+        echo "$BACKPORTS_LINE" > /etc/apt/sources.list.d/backports.list
+        echo "[INFO] Added ${DEBIAN_CODENAME}-backports repository."
+    fi
+
+    apt update
+    if apt install -y -t "${DEBIAN_CODENAME}-backports" rustc cargo; then
+        CURRENT_VER="$(rustc --version | awk '{print $2}')"
+        if version_ge "$CURRENT_VER" "$MIN_RUST_VERSION"; then
+            echo "[OK] Installed rustc $CURRENT_VER from ${DEBIAN_CODENAME}-backports."
+            RUST_OK=1
+        else
+            echo "[WARNING] ${DEBIAN_CODENAME}-backports only offers rustc $CURRENT_VER,"
+            echo "          which is below the required $MIN_RUST_VERSION. Removing it"
+            echo "          and falling back to rustup."
+            apt remove -y rustc cargo
+        fi
+    else
+        echo "[WARNING] rustc/cargo not available (or failed to install) from"
+        echo "          ${DEBIAN_CODENAME}-backports. Falling back to rustup."
+    fi
+fi
+
+if [[ "$RUST_OK" -eq 0 ]]; then
+    echo "=== Falling back to rustup (unattended) ==="
+    # Force IPv4 and bound the connect/overall time so a selectively-blocked
+    # path fails fast instead of hanging for the default multi-minute
+    # timeout; retry a couple of times in case of transient failures.
+    if curl --proto '=https' --tlsv1.2 -4 --connect-timeout 10 --max-time 120 \
+            --retry 2 --retry-delay 5 -sSf https://sh.rustup.rs -o /tmp/rustup-init.sh; then
+        sh /tmp/rustup-init.sh -y
+        # shellcheck disable=SC1091
+        source "$HOME/.cargo/env"
+        RUST_OK=1
+    else
+        echo "[ERROR] rustup download failed (network to static.rust-lang.org"
+        echo "        appears blocked). Options:"
+        echo "          1. Download rust-${MIN_RUST_VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+        echo "             from a host with working access and scp it to"
+        echo "             /usr/local/src on this machine, then run its"
+        echo "             install.sh manually."
+        echo "          2. Retry with an HTTPS proxy: https_proxy=http://<proxy>:<port>"
+        echo "          3. Check whether ${DEBIAN_CODENAME}-backports carries a"
+        echo "             newer rustc in the future and retry that path."
+        exit 1
+    fi
+fi
+
+if ! command -v rustc &>/dev/null; then
+    echo "[ERROR] rustc still not on PATH after installation attempts. Aborting."
+    exit 1
+fi
+echo "[OK] Using $(rustc --version)"
 
 echo "=== Step 5: Downloading and verifying Suricata source ==="
 mkdir -p /usr/local/src
