@@ -330,20 +330,67 @@ systemctl restart nftables
 echo "[OK] Firewall and NAT rules successfully applied."
 
 echo "=== Step 10: Configuring Suricata in IPS mode (NFQUEUE) ==="
-mkdir -p /etc/systemd/system/suricata.service.d
-cat <<EOF > /etc/systemd/system/suricata.service.d/override.conf
+# 'make install-full' (source build) does NOT install a systemd unit - only
+# the Debian package (apt install suricata) does. Since we build from
+# source, create the unit file ourselves rather than assuming one exists.
+mkdir -p /var/log/suricata /var/lib/suricata /var/run/suricata
+
+SURICATA_BIN="$(command -v suricata || echo /usr/local/bin/suricata)"
+
+if systemctl list-unit-files | grep -q '^suricata\.service'; then
+    # A suricata.service already exists (e.g. installed from a .deb
+    # package previously) - override its ExecStart instead of replacing
+    # the whole unit, so we don't clobber packaging-provided settings.
+    echo "[INFO] Existing suricata.service detected; adding drop-in override."
+    mkdir -p /etc/systemd/system/suricata.service.d
+    cat <<EOF > /etc/systemd/system/suricata.service.d/override.conf
 [Service]
 ExecStart=
-ExecStart=/usr/local/bin/suricata -c /etc/suricata/suricata.yaml -q 0 --pidfile /run/suricata.pid
+ExecStart=${SURICATA_BIN} -c /etc/suricata/suricata.yaml -q 0 --pidfile /run/suricata/suricata.pid
 EOF
+else
+    # No unit file at all (typical for a source build) - create one from
+    # scratch so Suricata runs as a proper daemon and starts on boot.
+    echo "[INFO] No suricata.service found; creating a new systemd unit."
+    cat <<EOF > /etc/systemd/system/suricata.service
+[Unit]
+Description=Suricata IDS/IPS daemon (NFQUEUE mode)
+Documentation=https://docs.suricata.io/
+# Must come up after networking and after nftables has created the queue
+# that Suricata attaches to; otherwise Suricata starts with nothing to read.
+After=network-online.target nftables.service
+Wants=network-online.target
+Requires=nftables.service
+
+[Service]
+Type=simple
+ExecStartPre=/usr/bin/env bash -c 'test -f /etc/suricata/suricata.yaml'
+ExecStart=${SURICATA_BIN} -c /etc/suricata/suricata.yaml -q 0 --pidfile /run/suricata/suricata.pid
+ExecReload=/bin/kill -HUP \$MAINPID
+Restart=on-failure
+RestartSec=5
+RuntimeDirectory=suricata
+RuntimeDirectoryMode=0755
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
+EOF
+fi
 
 systemctl daemon-reload
 systemctl enable suricata
 
 if systemctl start suricata; then
-    echo "[OK] Suricata started and enabled in IPS mode."
+    sleep 2
+    if systemctl is-active --quiet suricata; then
+        echo "[OK] Suricata started, enabled on boot, and running in IPS mode."
+    else
+        echo "[WARNING] Suricata reported start but is not active shortly after."
+        echo "          Check 'systemctl status suricata' and 'journalctl -u suricata -e'."
+    fi
 else
-    echo "[WARNING] Suricata failed to start. Check 'journalctl -u suricata' and"
+    echo "[WARNING] Suricata failed to start. Check 'journalctl -u suricata -e' and"
     echo "          /etc/suricata/suricata.yaml (HOME_NET, interface names, etc.)"
     echo "          before relying on the fail-open forward rules above."
 fi
