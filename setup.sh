@@ -47,6 +47,102 @@ if [[ $EUID -ne 0 ]]; then
    exit 1
 fi
 
+echo "=== Step 0: Verifying required network interfaces are present ==="
+# Must run before ANY changes are made - installing/removing NICs later is
+# not possible, and every later step (routing, nftables, Suricata queue
+# binding) assumes both interfaces already exist and are distinct.
+MISSING_IFACE=0
+ 
+if [[ "$SURICATA_INTERFACE" == "$INTERNAL_INTERFACE" ]]; then
+    echo "[ERROR] SURICATA_INTERFACE and INTERNAL_INTERFACE are set to the"
+    echo "        same value ('$SURICATA_INTERFACE'). They must be two"
+    echo "        distinct physical/virtual NICs. Fix the CONFIGURATION"
+    echo "        block at the top of this script."
+    MISSING_IFACE=1
+fi
+ 
+for IFACE in "$SURICATA_INTERFACE" "$INTERNAL_INTERFACE"; do
+    if [[ -d "/sys/class/net/$IFACE" ]]; then
+        echo "[OK] Interface '$IFACE' found."
+    else
+        echo "[ERROR] Interface '$IFACE' not found on this system."
+        MISSING_IFACE=1
+    fi
+done
+ 
+if [[ "$MISSING_IFACE" -eq 1 ]]; then
+    echo ""
+    echo "Available network interfaces on this system:"
+    ip -o link show | awk -F': ' '{print "  - "$2}' | grep -v '^  - lo$'
+    echo ""
+    echo "Update SURICATA_INTERFACE / INTERNAL_INTERFACE in the CONFIGURATION"
+    echo "block to match real interface names, then re-run this script."
+    echo "(Common causes: predictable naming like enp0s3/enp1s0 instead of"
+    echo "eth0/eth1, a missing/disconnected second NIC, or a NIC not yet"
+    echo "recognized because a driver/module isn't loaded.)"
+    exit 1
+fi
+ 
+# Count physical/virtual NICs excluding loopback, to catch the case where
+# only one interface exists at all (e.g. single-NIC VM or bare install)
+NIC_COUNT="$(ip -o link show | awk -F': ' '{print $2}' | grep -v '^lo$' | wc -l)"
+if [[ "$NIC_COUNT" -lt 2 ]]; then
+    echo "[ERROR] Only $NIC_COUNT non-loopback network interface(s) detected"
+    echo "        on this system, but a router setup requires at least two"
+    echo "        (WAN + LAN). Add a second NIC (physical or virtual) before"
+    echo "        continuing."
+    exit 1
+fi
+echo "[OK] At least two network interfaces are present ($NIC_COUNT detected)."
+ 
+echo ""
+echo "=== Step 0b: Verifying sudo target user exists ==="
+if id -u "$USERNAME_SUDO" &>/dev/null; then
+    echo "[OK] User '$USERNAME_SUDO' exists and will be added to the sudo group."
+else
+    echo "[WARNING] User '$USERNAME_SUDO' does not exist on this system yet."
+    echo "          Step 1 will skip adding it to the sudo group; you can"
+    echo "          create the account and run 'usermod -aG sudo $USERNAME_SUDO'"
+    echo "          manually afterwards, or fix USERNAME_SUDO in the"
+    echo "          CONFIGURATION block and re-run this script."
+    read -r -p "Continue anyway without a valid sudo user? [y/N] " CONFIRM_USER
+    if [[ ! "$CONFIRM_USER" =~ ^[Yy]$ ]]; then
+        echo "Aborted by user."
+        exit 1
+    fi
+fi
+ 
+echo ""
+echo "=== Step 0c: Verifying configured DNS servers are reachable ==="
+# These resolvers are relied on for apt/curl/wget throughout the rest of
+# the script (Step 3 points resolv.conf at them). If neither is reachable
+# now, every later network-dependent step will fail, so check up front.
+DNS_OK=0
+for DNS_IP in "$PRIMARY_NAMESERVER" "$SECONDARY_NAMESERVER"; do
+    if timeout 3 bash -c "echo > /dev/udp/${DNS_IP}/53" 2>/dev/null; then
+        echo "[OK] DNS server $DNS_IP is reachable on port 53/udp."
+        DNS_OK=1
+    elif ping -c 2 -W 2 "$DNS_IP" &>/dev/null; then
+        echo "[OK] DNS server $DNS_IP responds to ping (port 53 reachability"
+        echo "     could not be confirmed directly, but host is up)."
+        DNS_OK=1
+    else
+        echo "[WARNING] DNS server $DNS_IP is not reachable (no response to"
+        echo "          UDP/53 probe or ping)."
+    fi
+done
+ 
+if [[ "$DNS_OK" -eq 0 ]]; then
+    echo "[ERROR] Neither PRIMARY_NAMESERVER ($PRIMARY_NAMESERVER) nor"
+    echo "        SECONDARY_NAMESERVER ($SECONDARY_NAMESERVER) is reachable."
+    echo "        apt update, package downloads, and the Suricata/Rust"
+    echo "        download steps will fail without working DNS/internet"
+    echo "        access. Check WAN connectivity, or update these variables"
+    echo "        in the CONFIGURATION block to resolvers reachable from"
+    echo "        this network, then re-run."
+    exit 1
+fi
+
 # Simple confirmation gate since this rewrites networking/firewall
 read -r -p "This will reconfigure networking, firewall and DNS on this host. Continue? [y/N] " CONFIRM
 if [[ ! "$CONFIRM" =~ ^[Yy]$ ]]; then
