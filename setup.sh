@@ -35,6 +35,22 @@ LAN_NETMASK="255.255.255.0"
 # workstation/LAN subnet, not 0.0.0.0/0.
 SSH_ALLOWED_SOURCE="192.168.1.0/24"
 
+# Local DNS zone served by BIND9 for the LAN. Clients using this router as
+# their resolver will be able to resolve "<name>.$LOCAL_DOMAIN" to the IPs
+# listed in LOCAL_DNS_RECORDS below. Everything else is forwarded upstream
+# to PRIMARY_NAMESERVER/SECONDARY_NAMESERVER.
+LOCAL_DOMAIN="lan.local"
+# Add one "hostname:ip" entry per line for every host you want resolvable
+# by name on the LAN. The router itself is included by default.
+LOCAL_DNS_RECORDS=(
+    "router:${LAN_ADDRESS}"
+    # "nas:192.168.1.10"
+    # "printer:192.168.1.20"
+)
+# NOTE: the reverse (PTR) zone generated below assumes a /24 LAN
+# (255.255.255.0). If LAN_NETMASK is different, adjust REVERSE_ZONE
+# generation in Step 3b manually.
+
 # Suricata official download & checksum verification
 SURICATA_TARBALL="suricata-${SURICATA_VERSION}.tar.gz"
 SURICATA_URL="https://www.openinfosecfoundation.org/download/${SURICATA_TARBALL}"
@@ -186,7 +202,7 @@ fi
 systemctl enable nftables
 
 echo "=== Step 3: Installation of BIND 9 ==="
-apt install -y bind9 bind9-doc resolvconf
+apt install -y bind9 bind9-doc bind9-utils bind9-dnsutils resolvconf
 
 echo "[INFO] Setting temporary public resolvers to continue script execution..."
 mkdir -p /etc/resolvconf/resolv.conf.d
@@ -195,6 +211,133 @@ echo "nameserver ${SECONDARY_NAMESERVER}" >> /etc/resolvconf/resolv.conf.d/head
 resolvconf -u
 sleep 2
 echo "[OK] Temporary name resolution active."
+
+echo "=== Step 3b: Configuring BIND9 local zone (${LOCAL_DOMAIN}) ==="
+# Only /24 LAN netmasks are handled automatically for the reverse zone.
+if [[ "$LAN_NETMASK" != "255.255.255.0" ]]; then
+    echo "[WARNING] LAN_NETMASK is $LAN_NETMASK, not 255.255.255.0. The"
+    echo "          reverse (PTR) zone generated below assumes a /24 and"
+    echo "          will likely be WRONG. Adjust it manually afterwards."
+fi
+ 
+IFS='.' read -r OCT1 OCT2 OCT3 OCT4 <<< "$LAN_ADDRESS"
+LAN_SUBNET="${OCT1}.${OCT2}.${OCT3}.0/24"
+REVERSE_ZONE="${OCT3}.${OCT2}.${OCT1}.in-addr.arpa"
+ZONE_SERIAL="$(date +%Y%m%d)01"
+ 
+mkdir -p /etc/bind
+[[ -f /etc/bind/named.conf.options ]] && cp /etc/bind/named.conf.options /etc/bind/named.conf.options.bak
+[[ -f /etc/bind/named.conf.local ]] && cp /etc/bind/named.conf.local /etc/bind/named.conf.local.bak
+ 
+# named.conf.options: forward everything not covered by our local zone to
+# the configured upstream resolvers, and only answer LAN clients.
+cat <<EOF > /etc/bind/named.conf.options
+options {
+    directory "/var/cache/bind";
+ 
+    // Only resolve for the LAN and the router itself.
+    listen-on { 127.0.0.1; ${LAN_ADDRESS}; };
+    allow-query { localhost; ${LAN_SUBNET}; };
+    allow-recursion { localhost; ${LAN_SUBNET}; };
+ 
+    // Anything outside our local zone is forwarded upstream.
+    forwarders {
+        ${PRIMARY_NAMESERVER};
+        ${SECONDARY_NAMESERVER};
+    };
+    forward only;
+ 
+    recursion yes;
+    dnssec-validation auto;
+    listen-on-v6 { none; };
+};
+EOF
+ 
+# named.conf.local: declare the forward and reverse zones for the LAN.
+cat <<EOF > /etc/bind/named.conf.local
+zone "${LOCAL_DOMAIN}" {
+    type master;
+    file "/etc/bind/db.${LOCAL_DOMAIN}";
+    allow-update { none; };
+};
+ 
+zone "${REVERSE_ZONE}" {
+    type master;
+    file "/etc/bind/db.${REVERSE_ZONE}";
+    allow-update { none; };
+};
+EOF
+ 
+# Forward zone file: A record per entry in LOCAL_DNS_RECORDS.
+{
+    echo "\$TTL    604800"
+    echo "@       IN      SOA     router.${LOCAL_DOMAIN}. admin.${LOCAL_DOMAIN}. ("
+    echo "                          ${ZONE_SERIAL}   ; Serial"
+    echo "                             28800   ; Refresh"
+    echo "                              7200   ; Retry"
+    echo "                            604800   ; Expire"
+    echo "                             86400 ) ; Negative Cache TTL"
+    echo ";"
+    echo "@       IN      NS      router.${LOCAL_DOMAIN}."
+    echo "router  IN      A       ${LAN_ADDRESS}"
+    for ENTRY in "${LOCAL_DNS_RECORDS[@]}"; do
+        NAME="${ENTRY%%:*}"
+        IP="${ENTRY##*:}"
+        [[ "$NAME" == "router" ]] && continue # already added above
+        echo "${NAME}    IN      A       ${IP}"
+    done
+} > "/etc/bind/db.${LOCAL_DOMAIN}"
+ 
+# Reverse zone file: PTR record per entry in LOCAL_DNS_RECORDS.
+{
+    echo "\$TTL    604800"
+    echo "@       IN      SOA     router.${LOCAL_DOMAIN}. admin.${LOCAL_DOMAIN}. ("
+    echo "                          ${ZONE_SERIAL}   ; Serial"
+    echo "                             28800   ; Refresh"
+    echo "                              7200   ; Retry"
+    echo "                            604800   ; Expire"
+    echo "                             86400 ) ; Negative Cache TTL"
+    echo ";"
+    echo "@       IN      NS      router.${LOCAL_DOMAIN}."
+    for ENTRY in "${LOCAL_DNS_RECORDS[@]}"; do
+        NAME="${ENTRY%%:*}"
+        IP="${ENTRY##*:}"
+        LAST_OCTET="${IP##*.}"
+        echo "${LAST_OCTET}    IN      PTR     ${NAME}.${LOCAL_DOMAIN}."
+    done
+} > "/etc/bind/db.${REVERSE_ZONE}"
+ 
+chown -R bind:bind "/etc/bind/db.${LOCAL_DOMAIN}" "/etc/bind/db.${REVERSE_ZONE}"
+ 
+# Validate configuration and zone files BEFORE restarting, so a mistake
+# here doesn't take down a previously-working BIND9 instance.
+CONFIG_VALID=1
+named-checkconf /etc/bind/named.conf.options || CONFIG_VALID=0
+named-checkconf /etc/bind/named.conf.local || CONFIG_VALID=0
+named-checkzone "${LOCAL_DOMAIN}" "/etc/bind/db.${LOCAL_DOMAIN}" || CONFIG_VALID=0
+named-checkzone "${REVERSE_ZONE}" "/etc/bind/db.${REVERSE_ZONE}" || CONFIG_VALID=0
+ 
+if [[ "$CONFIG_VALID" -eq 1 ]]; then
+    systemctl restart bind9
+    sleep 1
+    if dig @127.0.0.1 "router.${LOCAL_DOMAIN}" +short &>/dev/null && \
+       [[ -n "$(dig @127.0.0.1 "router.${LOCAL_DOMAIN}" +short)" ]]; then
+        echo "[OK] BIND9 local zone '${LOCAL_DOMAIN}' active; router.${LOCAL_DOMAIN} -> ${LAN_ADDRESS}"
+    else
+        echo "[WARNING] BIND9 restarted but did not answer a test query for"
+        echo "          router.${LOCAL_DOMAIN}. Check 'journalctl -u bind9 -e'."
+    fi
+else
+    echo "[ERROR] BIND9 configuration/zone check failed; NOT restarting bind9"
+    echo "        to avoid breaking the existing service. Review the errors"
+    echo "        above, fix /etc/bind/named.conf.* or the zone files, then"
+    echo "        run 'named-checkconf' and 'systemctl restart bind9' manually."
+fi
+ 
+echo "[INFO] To add more LAN hosts later: edit LOCAL_DNS_RECORDS in this"
+echo "       script's CONFIGURATION block and re-run Step 3b, or edit"
+echo "       /etc/bind/db.${LOCAL_DOMAIN} and /etc/bind/db.${REVERSE_ZONE}"
+echo "       directly, bump the Serial number, then 'systemctl reload bind9'."
 
 echo "=== Step 4: Preparing for Suricata build ==="
 apt install -y autoconf automake build-essential \
